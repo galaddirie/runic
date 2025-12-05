@@ -228,8 +228,8 @@ defmodule Runic.Workflow do
           )
 
         generation =
-          if(ro.reaction == :generation and ro.to > wrk.generations) do
-            ro.to
+          if(ro.reaction == :generation and ro.from > wrk.generations) do
+            ro.from
           else
             wrk.generations
           end
@@ -1260,15 +1260,6 @@ defmodule Runic.Workflow do
       ],
       where: fn edge -> edge.weight > fact_generation end
     )
-  |> Enum.map(fn edge ->
-    %ReactionOccurred{
-      from: edge.v1,
-      to: edge.v2,
-      reaction: edge.label,
-      weight: edge.weight,
-      properties: edge.properties
-    }
-  end)
   end
 
   defp any_match_phase_runnables?(%__MODULE__{graph: graph}) do
