@@ -1190,8 +1190,26 @@ defmodule Runic.Workflow do
   so the workflow state can be rebuilt with `from_log/1`.
   """
   def invoke_with_events(%__MODULE__{} = wrk, step, fact) do
+    existing_produced_hashes =
+      wrk.graph
+      |> Graph.out_edges(step, by: [:produced, :state_produced, :reduced])
+      |> MapSet.new(fn edge -> edge.v2.hash end)
+
     wrk = invoke(wrk, step, fact)
-    new_events = events_produced_since(wrk, fact)
+
+    new_events =
+      wrk.graph
+      |> Graph.out_edges(step, by: [:produced, :state_produced, :reduced])
+      |> Enum.reject(fn edge -> MapSet.member?(existing_produced_hashes, edge.v2.hash) end)
+      |> Enum.map(fn edge ->
+        %ReactionOccurred{
+          from: edge.v1,
+          to: edge.v2,
+          reaction: edge.label,
+          weight: edge.weight,
+          properties: edge.properties
+        }
+      end)
 
     {wrk, new_events}
   end
