@@ -508,7 +508,7 @@ defmodule Runic.Workflow do
       workflow
       | graph:
           g
-          |> Graph.add_vertex(child_step, to_string(child_step.hash))
+          |> Graph.add_vertex(child_step, child_step.hash)
           |> Graph.add_edge(parent_step, child_step, label: :flow, weight: 0)
     }
     |> maybe_put_component(child_step)
