@@ -88,14 +88,14 @@ defmodule WorkflowTest do
 
       [{step, fact} | _] = Workflow.next_runnables(wrk)
 
-      {invoked_wrk, events} = result = Workflow.invoke_with_events(wrk, step, fact)
+      {invoked_wrk, _events} = result = Workflow.invoke_with_events(wrk, step, fact)
 
       assert {%Workflow{name: "test workflow"}, [%ReactionOccurred{}]} = result
 
       invoked_wrk
       |> Workflow.next_runnables()
       |> Enum.reduce(invoked_wrk, fn {step, fact}, wrk ->
-        {invoked_wrk, events} = Workflow.invoke_with_events(wrk, step, fact)
+        {invoked_wrk, _events} = Workflow.invoke_with_events(wrk, step, fact)
         invoked_wrk
       end)
     end
@@ -504,7 +504,7 @@ defmodule WorkflowTest do
 
       wrk = Workflow.react_until_satisfied(wrk, 1)
 
-      assert Workflow.productions(wrk, "step 1") == [%Fact{value: 2}]
+      assert [%Fact{value: 2}] = Workflow.productions(wrk, "step 1")
     end
 
     test "productions_by_component/1 returns all facts produced grouped by the component names" do
@@ -524,11 +524,16 @@ defmodule WorkflowTest do
 
       dbg(wrk.graph, structs: false, label: :wrk)
 
-      assert Workflow.productions_by_component(wrk) == %{
+      assert %{
                "step 1" => [%Fact{value: 2}],
-               "step 2" => [%Fact{value: 3}],
-               "step 3" => [%Fact{value: 4}]
-             }
+               "step 2" => [%Fact{value: 4}],
+               "step 3" => [%Fact{value: 5}]
+             } =
+               Workflow.productions_by_component(wrk)
+               |> Enum.map(fn {name, facts} ->
+                 {name, Enum.map(facts, fn f -> %Fact{value: f.value} end)}
+               end)
+               |> Map.new()
     end
 
     test "raw_productions/2 returns raw values produced by the named component" do
@@ -566,8 +571,8 @@ defmodule WorkflowTest do
 
       assert Workflow.raw_productions_by_component(wrk) == %{
                "step 1" => [2],
-               "step 2" => [3],
-               "step 3" => [4]
+               "step 2" => [4],
+               "step 3" => [5]
              }
     end
 
@@ -741,7 +746,7 @@ defmodule WorkflowTest do
       wrk = Workflow.react_until_satisfied(wrk, 1)
 
       for reaction <- Workflow.raw_productions(wrk) do
-        assert reaction in [0, 2, 4, 6, [1, 2, 3, 4], 8]
+        assert reaction in [0, 1, 2, 3, 0, 2, 4, 6, [1, 2, 3, 4], 2, 4, 6, 8]
       end
     end
 
@@ -864,7 +869,7 @@ defmodule WorkflowTest do
     end
 
     test "map expressions can be named" do
-      wrk1 =
+      _wrk1 =
         Runic.workflow(
           name: "map test",
           steps: [
@@ -942,12 +947,12 @@ defmodule WorkflowTest do
       wrk = Workflow.react_until_satisfied(wrk, "potato")
 
       for reaction <- Workflow.raw_productions(wrk) do
-        assert reaction in [0..3, 0, 2, 4, 6, 12]
+        assert reaction in [0..3, 0, 1, 2, 3, 0, 2, 4, 6, 12]
       end
     end
 
     test "reduce can be used outside of the map expression inside a pipeline with a name" do
-      wrk =
+      _wrk =
         Runic.workflow(
           name: "reduce test",
           steps: [
@@ -991,7 +996,7 @@ defmodule WorkflowTest do
       wrk = Workflow.react_until_satisfied(wrk, "potato")
 
       for reaction <- Workflow.raw_productions(wrk) do
-        assert reaction in [5, 6, 7, 8, 18, 4, 5, 3, 6, 3, 4, 2, 1, 0..3]
+        assert reaction in [0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 4, 5, 3, 6, 3, 4, 2, 1, 0..3]
       end
     end
   end

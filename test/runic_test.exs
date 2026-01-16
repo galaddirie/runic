@@ -333,7 +333,7 @@ defmodule RunicTest do
 
   test "all runic components can be recovered from a log with bindings and their original environment" do
     some_var = 1
-    some_other_var = 2
+    _some_other_var = 2
 
     step = Runic.step(fn num -> num + ^some_var end, name: :step_1)
     rule = Runic.rule(fn num when is_integer(num) -> num + ^some_var end, name: :rule_1)

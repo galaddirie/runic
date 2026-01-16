@@ -4,5 +4,5 @@ defmodule Runic.Workflow.FanOut do
 
   FanOut just splits input facts - separate steps as defined in the map expression will do the processing.
   """
-  defstruct [:hash, :name]
+  defstruct [:hash, :name, :work]
 end

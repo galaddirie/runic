@@ -35,6 +35,39 @@ defprotocol Runic.Component do
   # def remove(component, workflow)
 end
 
+defimpl Runic.Component, for: Runic.Workflow.FanOut do
+  alias Runic.Workflow
+
+  def components(fan_out) do
+    [fan_out: fan_out]
+  end
+
+  def connect(fan_out, to, workflow) do
+    Workflow.add_step(workflow, to, fan_out)
+  end
+
+  def get_component(fan_out, _kind) do
+    fan_out
+  end
+
+  def connectables(fan_out, _other_component) do
+    components(fan_out)
+  end
+
+  def connectable?(_fan_out, _other_component) do
+    true
+  end
+
+  def source(_fan_out) do
+    # FanOut doesn't have a source AST stored usually
+    nil
+  end
+
+  def hash(fan_out) do
+    fan_out.hash
+  end
+end
+
 defimpl Runic.Component, for: Runic.Workflow.Map do
   alias Runic.Workflow
   alias Runic.Workflow.Root

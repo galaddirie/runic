@@ -482,7 +482,8 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanOut do
 
   alias Runic.Workflow.{
     Fact,
-    FanOut
+    FanOut,
+    Components
   }
 
   def invoke(
@@ -490,14 +491,21 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanOut do
         %Workflow{} = workflow,
         %Fact{} = source_fact
       ) do
-    unless is_nil(Enumerable.impl_for(source_fact.value)) do
+    items =
+      if fan_out.work do
+        Components.run(fan_out.work, source_fact.value, Components.arity_of(fan_out.work))
+      else
+        source_fact.value
+      end
+
+    items_fact = Fact.new(value: items, ancestry: {fan_out.hash, source_fact.hash})
+
+    unless is_nil(Enumerable.impl_for(items)) do
+      causal_generation = Workflow.causal_generation(workflow, source_fact)
       is_reduced? = is_reduced?(workflow, fan_out)
 
-      causal_generation = Workflow.causal_generation(workflow, source_fact)
-
-      Enum.reduce(source_fact.value, workflow, fn value, wrk ->
-        fact =
-          Fact.new(value: value, ancestry: {fan_out.hash, source_fact.hash})
+      Enum.reduce(items, workflow, fn value, wrk ->
+        fact = Fact.new(value: value, ancestry: {fan_out.hash, source_fact.hash})
 
         wrk
         |> Workflow.log_fact(fact)
@@ -506,8 +514,11 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanOut do
         |> maybe_prepare_map_reduce(is_reduced?, fan_out, fact)
       end)
       |> Workflow.mark_runnable_as_ran(fan_out, source_fact)
+      |> Workflow.run_after_hooks(fan_out, items_fact)
     else
-      Workflow.mark_runnable_as_ran(workflow, fan_out, source_fact)
+      workflow
+      |> Workflow.mark_runnable_as_ran(fan_out, source_fact)
+      |> Workflow.run_after_hooks(fan_out, items_fact)
     end
   end
 
@@ -566,7 +577,7 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanIn do
         |> Workflow.log_fact(reduced_fact)
         |> Workflow.run_after_hooks(fan_in, reduced_fact)
         |> Workflow.prepare_next_runnables(fan_in, reduced_fact)
-        |> Workflow.draw_connection(fact, fan_in, :reduced, weight: causal_generation)
+        |> Workflow.draw_connection(fan_in, reduced_fact, :reduced, weight: causal_generation)
         |> Workflow.mark_runnable_as_ran(fan_in, fact)
 
       %FanOut{} ->

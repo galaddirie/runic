@@ -862,7 +862,7 @@ defmodule Runic.Workflow do
     for %Graph.Edge{} = edge <-
           Graph.edges(
             graph,
-            by: [:produced, :ran],
+            by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out, :ran],
             where: fn edge -> match?(%Fact{}, edge.v1) or match?(%Fact{}, edge.v2) end
           ),
         uniq: true do
@@ -883,7 +883,7 @@ defmodule Runic.Workflow do
   """
   def productions(%__MODULE__{graph: graph}) do
     for %Graph.Edge{} = edge <-
-          Graph.edges(graph, by: [:produced, :state_produced, :state_initiated, :reduced]) do
+          Graph.edges(graph, by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]) do
       edge.v2
     end
   end
@@ -893,7 +893,19 @@ defmodule Runic.Workflow do
 
   Many components are made up of sub components so this may return multiple facts for each part.
   """
-  def productions(%__MODULE__{} = wrk, component_name) do
+  def productions(%__MODULE__{graph: graph} = wrk, component_name) do
+    case get_component(wrk, component_name) do
+      nil ->
+        []
+
+      component ->
+        for %Graph.Edge{} = edge <-
+              Graph.out_edges(graph, component.hash,
+                by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]
+              ) do
+          edge.v2
+        end
+    end
   end
 
   @doc """
@@ -901,7 +913,10 @@ defmodule Runic.Workflow do
 
   Returns a map where each key is the name of the component and the value is a list of facts produced by that component.
   """
-  def productions_by_component(%__MODULE__{graph: graph, components: components}) do
+  def productions_by_component(%__MODULE__{} = wrk) do
+    for {name, _component} <- wrk.components, into: %{} do
+      {name, productions(wrk, name)}
+    end
   end
 
   @doc """
@@ -917,15 +932,20 @@ defmodule Runic.Workflow do
   """
   def raw_productions(%__MODULE__{graph: graph}) do
     for %Graph.Edge{} = edge <-
-          Graph.edges(graph, by: [:produced, :state_produced, :state_initiated, :reduced]) do
+          Graph.edges(graph, by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]) do
       edge.v2.value
     end
   end
 
-  def raw_productions(%__MODULE__{graph: graph}, component_name) do
+  def raw_productions(%__MODULE__{} = wrk, component_name) do
+    productions(wrk, component_name)
+    |> Enum.map(& &1.value)
   end
 
-  def raw_productions_by_component(%__MODULE__{graph: graph}) do
+  def raw_productions_by_component(%__MODULE__{} = wrk) do
+    for {name, _component} <- wrk.components, into: %{} do
+      {name, raw_productions(wrk, name)}
+    end
   end
 
   @spec facts(Runic.Workflow.t()) :: list(Runic.Workflow.Fact.t())
@@ -1165,12 +1185,14 @@ defmodule Runic.Workflow do
         %__MODULE__{graph: graph},
         %Fact{ancestry: {_parent_step_hash, _parent_fact_hash}} = production_fact
       ) do
-    graph
-    |> Graph.edges(production_fact, by: [:produced, :state_produced, :state_initiated, :fan_out])
-    |> hd()
-    |> Map.get(:weight)
+    edge =
+      graph
+      |> Graph.edges(production_fact,
+        by: [:produced, :state_produced, :state_initiated, :fan_out, :reduced]
+      )
+      |> hd()
 
-    +1
+    (edge.weight || 0) + 1
   end
 
   def causal_generation(
@@ -1192,14 +1214,14 @@ defmodule Runic.Workflow do
   def invoke_with_events(%__MODULE__{} = wrk, step, fact) do
     existing_produced_hashes =
       wrk.graph
-      |> Graph.out_edges(step, by: [:produced, :state_produced, :reduced])
+      |> Graph.out_edges(step, by: [:produced, :state_produced, :reduced, :fan_out])
       |> MapSet.new(fn edge -> edge.v2.hash end)
 
     wrk = invoke(wrk, step, fact)
 
     new_events =
       wrk.graph
-      |> Graph.out_edges(step, by: [:produced, :state_produced, :reduced])
+      |> Graph.out_edges(step, by: [:produced, :state_produced, :reduced, :fan_out])
       |> Enum.reject(fn edge -> MapSet.member?(existing_produced_hashes, edge.v2.hash) end)
       |> Enum.map(fn edge ->
         %ReactionOccurred{
@@ -1224,10 +1246,12 @@ defmodule Runic.Workflow do
     # return reaction edges transformed to %ReactionOccurred{} events that do not involve productions known since the given fact
 
     fact_generation =
-      wrk.graph
-      |> Graph.in_edges(fact, by: :produced)
-      |> hd()
-      |> Map.get(:weight)
+      case Graph.in_edges(wrk.graph, fact,
+             by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]
+           ) do
+        [edge | _] -> Map.get(edge, :weight, 0)
+        [] -> 0
+      end
 
     Graph.edges(wrk.graph,
       by: [
@@ -1237,7 +1261,6 @@ defmodule Runic.Workflow do
         :satisfied,
         :state_initiated,
         :fan_out,
-        :reduced,
         :joined
       ],
       where: fn edge -> edge.weight > fact_generation end
@@ -1260,10 +1283,10 @@ defmodule Runic.Workflow do
     # return reaction edges transformed to %ReactionOccurred{} events that do not involve productions known since the given fact
 
     fact_generation =
-      graph
-      |> Graph.in_edges(fact, by: :generation)
-      |> hd()
-      |> Map.get(:v1)
+      case Graph.in_edges(graph, fact, by: :generation) do
+        [edge | _] -> Map.get(edge, :v1, 0)
+        [] -> 0
+      end
 
     Graph.edges(graph,
       by: [
@@ -1273,7 +1296,6 @@ defmodule Runic.Workflow do
         :satisfied,
         :state_initiated,
         :fan_out,
-        :reduced,
         :joined
       ],
       where: fn edge -> edge.weight > fact_generation end
