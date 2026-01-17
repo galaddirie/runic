@@ -8,6 +8,7 @@ defmodule Runic.Workflow.Condition do
 
   def new(opts) do
     params_map = if Keyword.keyword?(opts), do: Map.new(opts), else: opts
+
     struct!(__MODULE__, params_map)
     |> maybe_set_name()
   end

@@ -883,7 +883,9 @@ defmodule Runic.Workflow do
   """
   def productions(%__MODULE__{graph: graph}) do
     for %Graph.Edge{} = edge <-
-          Graph.edges(graph, by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]) do
+          Graph.edges(graph,
+            by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]
+          ) do
       edge.v2
     end
   end
@@ -932,7 +934,9 @@ defmodule Runic.Workflow do
   """
   def raw_productions(%__MODULE__{graph: graph}) do
     for %Graph.Edge{} = edge <-
-          Graph.edges(graph, by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]) do
+          Graph.edges(graph,
+            by: [:produced, :state_produced, :state_initiated, :reduced, :fan_out]
+          ) do
       edge.v2.value
     end
   end

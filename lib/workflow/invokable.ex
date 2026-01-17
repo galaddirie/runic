@@ -123,12 +123,7 @@ end
 
 defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Step do
   alias Runic.Workflow
-
-  alias Runic.Workflow.{
-    Fact,
-    Step,
-    Components
-  }
+  alias Runic.Workflow.{Fact, Step, Components}
 
   @spec invoke(%Runic.Workflow.Step{}, Runic.Workflow.t(), Runic.Workflow.Fact.t()) ::
           Runic.Workflow.t()
@@ -139,7 +134,16 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Step do
       ) do
     result = Components.run(step.work, fact.value, Components.arity_of(step.work))
 
-    result_fact = Fact.new(value: result, ancestry: {step.hash, fact.hash})
+    # Propagate item_index and items_total from input fact to output fact
+    # This allows joins to correctly pair items even after multiple transformations
+    result_fact =
+      Fact.new(
+        value: result,
+        ancestry: {step.hash, fact.hash},
+        item_index: fact.item_index,
+        items_total: fact.items_total,
+        fan_out_hash: fact.fan_out_hash
+      )
 
     causal_generation = Workflow.causal_generation(workflow, fact)
 
@@ -151,17 +155,6 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Step do
     |> Workflow.prepare_next_runnables(step, result_fact)
     |> maybe_prepare_map_reduce(step, result_fact)
   end
-
-  # def replay(step, workflow, fact) do
-  #   parent_fact = Map.get(workflow.graph.vertices, elem(fact.ancestry, 1))
-
-  #   workflow
-  #   |> Workflow.log_fact(fact)
-  #   |> Workflow.draw_connection(step, fact, :produced, weight: workflow.generations)
-  #   |> Workflow.mark_runnable_as_ran(step, parent_fact)
-  #   |> Workflow.prepare_next_runnables(step, fact)
-  #   |> maybe_prepare_map_reduce(step, fact)
-  # end
 
   def match_or_execute(_step), do: :execute
 
@@ -179,10 +172,6 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Step do
       workflow
     end
   end
-
-  # def runnable_connection(_step), do: :runnable
-  # def resolved_connection(_step), do: :ran
-  # def causal_connection(_step), do: :produced
 end
 
 defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Conjunction do
@@ -405,11 +394,7 @@ end
 
 defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Join do
   alias Runic.Workflow
-
-  alias Runic.Workflow.{
-    Fact,
-    Join
-  }
+  alias Runic.Workflow.{Fact, Join}
 
   @spec invoke(%Runic.Workflow.Join{}, Runic.Workflow.t(), Runic.Workflow.Fact.t()) ::
           Runic.Workflow.t()
@@ -418,20 +403,26 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Join do
         %Workflow{} = workflow,
         %Fact{ancestry: {_parent_hash, _value_hash}} = fact
       ) do
-    # a join has n parents that must have produced a fact
-    # a join's parent steps are either part of a runnable (for a partially satisfied join)
-    # or each step has a produced edge to a new fact for whom the current fact is the ancestor
-
     causal_generation = Workflow.causal_generation(workflow, fact)
 
     workflow =
       Workflow.draw_connection(workflow, fact, join, :joined, weight: causal_generation)
 
+    if Join.fan_out_aware?(join) do
+      invoke_fan_out_aware(join, workflow, fact, causal_generation)
+    else
+      invoke_standard(join, workflow, fact, causal_generation)
+    end
+  end
+
+  # Standard join: wait for one fact from each parent branch
+  defp invoke_standard(join, workflow, fact, causal_generation) do
     join_order_weights =
       join.joins
       |> Enum.with_index()
       |> Map.new()
 
+    # Get all joined facts for this join
     possible_priors =
       workflow.graph
       |> Graph.in_edges(join)
@@ -444,13 +435,162 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Join do
       |> Enum.map(& &1.v1.value)
 
     if Enum.count(join.joins) == Enum.count(possible_priors) do
-      join_bindings_fact = Fact.new(value: possible_priors, ancestry: {join.hash, fact.hash})
+      produce_join_result(join, workflow, fact, possible_priors, causal_generation)
+    else
+      workflow
+    end
+  end
 
-      workflow =
-        workflow
-        |> Workflow.log_fact(join_bindings_fact)
-        |> Workflow.prepare_next_runnables(join, join_bindings_fact)
+  # Fan-out aware join: collect all items from each branch, then apply join mode
+  defp invoke_fan_out_aware(join, workflow, fact, causal_generation) do
+    # Group joined facts by their originating branch (parent step hash)
+    joined_edges =
+      workflow.graph
+      |> Graph.in_edges(join)
+      |> Enum.filter(&(&1.label == :joined))
 
+    # Group facts by their parent step hash
+    facts_by_branch =
+      Enum.group_by(joined_edges, fn edge ->
+        {parent_hash, _} = edge.v1.ancestry
+        parent_hash
+      end)
+
+    # Check if we have facts from all branches
+    # For fan-out aware joins, we need to check if all fan-out branches have completed
+    all_branches_ready? = check_all_branches_ready(join, workflow, facts_by_branch)
+
+    if all_branches_ready? do
+      # Collect values from each branch in join order, sorted by item_index
+      branch_values =
+        Enum.map(join.joins, fn parent_hash ->
+          edges = Map.get(facts_by_branch, parent_hash, [])
+
+          edges
+          |> Enum.sort_by(fn edge ->
+            # Sort by item_index for correct pairing
+            # Use the fact's item_index, tracing back through ancestry if needed
+            get_fact_item_index(workflow, edge.v1)
+          end)
+          |> Enum.map(& &1.v1.value)
+        end)
+
+      # Apply the join mode to combine branch values
+      joined_values = Join.apply_mode(join.mode, branch_values)
+
+      # Produce a fact for each joined value
+      produce_fan_out_join_results(join, workflow, fact, joined_values, causal_generation)
+    else
+      workflow
+    end
+  end
+
+  defp check_all_branches_ready(join, workflow, facts_by_branch) do
+    # For each branch, check if we have received all items from the fan-out
+    Enum.all?(join.joins, fn parent_hash ->
+      branch_facts = Map.get(facts_by_branch, parent_hash, [])
+
+      if Enum.empty?(branch_facts) do
+        false
+      else
+        # Check if this branch's fan-out has completed
+        fan_out_hash = Map.get(join.fan_out_sources || %{}, parent_hash)
+
+        if fan_out_hash do
+          check_fan_out_complete(workflow, fan_out_hash, parent_hash, branch_facts)
+        else
+          # Not a fan-out branch, just need one fact
+          true
+        end
+      end
+    end)
+  end
+
+  defp check_fan_out_complete(workflow, fan_out_hash, parent_hash, branch_facts) do
+    # Get all facts produced by this fan-out in the current generation
+    fan_out_facts =
+      workflow.graph
+      |> Graph.out_edges(fan_out_hash, by: :fan_out)
+      |> Enum.filter(fn edge ->
+        fact_generation = get_fact_generation(workflow, edge.v2)
+        fact_generation == workflow.generations
+      end)
+      |> length()
+
+    # For the join to be ready, we need the same number of facts from this branch
+    # as were produced by the fan-out (accounting for potential filtering in between)
+    #
+    # A more robust check: look at the mapped paths to see if all items have flowed through
+    mapped_key = {workflow.generations, parent_hash}
+    sister_fact_count = workflow.mapped[mapped_key] |> List.wrap() |> length()
+
+    # The branch is ready if:
+    # 1. We have at least one fact, AND
+    # 2. Either the fan-out count matches our branch count, OR
+    # 3. All items that passed through the parent step have reached the join
+    branch_count = length(branch_facts)
+
+    cond do
+      # If we're tracking via mapped paths, use that
+      sister_fact_count > 0 -> branch_count >= sister_fact_count
+      # Otherwise, compare against fan-out production
+      fan_out_facts > 0 -> branch_count >= fan_out_facts
+      # Fallback: we have at least one fact
+      true -> branch_count > 0
+    end
+  end
+
+  defp get_fact_generation(workflow, fact) do
+    workflow.graph
+    |> Graph.in_edges(fact)
+    |> Enum.find_value(fn edge ->
+      if edge.label == :generation, do: edge.v1, else: nil
+    end)
+  end
+
+  # Get the item index for a fact, tracing back through ancestry if needed
+  defp get_fact_item_index(workflow, %Fact{item_index: index}) when not is_nil(index) do
+    index
+  end
+
+  defp get_fact_item_index(workflow, %Fact{ancestry: {parent_hash, _}} = fact) do
+    # Trace back through the ancestry to find the original fan-out item index
+    parent_fact = find_ancestor_with_index(workflow, fact)
+
+    case parent_fact do
+      %Fact{item_index: index} when not is_nil(index) -> index
+      # Fallback to hash for deterministic ordering
+      _ -> fact.hash
+    end
+  end
+
+  defp get_fact_item_index(_workflow, _fact), do: 0
+
+  # Find the nearest ancestor fact that has an item_index
+  defp find_ancestor_with_index(workflow, %Fact{item_index: index}) when not is_nil(index) do
+    %Fact{item_index: index}
+  end
+
+  defp find_ancestor_with_index(workflow, %Fact{ancestry: nil}), do: nil
+
+  defp find_ancestor_with_index(workflow, %Fact{ancestry: {_parent_step_hash, parent_fact_hash}}) do
+    case Map.get(workflow.graph.vertices, parent_fact_hash) do
+      %Fact{} = parent_fact -> find_ancestor_with_index(workflow, parent_fact)
+      _ -> nil
+    end
+  end
+
+  defp find_ancestor_with_index(_workflow, _), do: nil
+
+  defp produce_join_result(join, workflow, fact, values, causal_generation) do
+    join_bindings_fact = Fact.new(value: values, ancestry: {join.hash, fact.hash})
+
+    workflow =
+      workflow
+      |> Workflow.log_fact(join_bindings_fact)
+      |> Workflow.prepare_next_runnables(join, join_bindings_fact)
+
+    workflow =
       workflow.graph
       |> Graph.in_edges(join)
       |> Enum.filter(&(&1.label in [:runnable, :joined]))
@@ -465,10 +605,65 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Join do
                 wrk.graph |> Graph.update_labelled_edge(v1, v2, :joined, label: :join_satisfied)
           }
       end)
-      |> Workflow.draw_connection(join, join_bindings_fact, :produced,
-        weight: workflow.generations
-      )
-      |> Workflow.run_after_hooks(join, join_bindings_fact)
+
+    workflow
+    |> Workflow.draw_connection(join, join_bindings_fact, :produced, weight: causal_generation)
+    |> Workflow.run_after_hooks(join, join_bindings_fact)
+  end
+
+  defp produce_fan_out_join_results(join, workflow, fact, joined_values, causal_generation) do
+    # For fan-out joins, we produce multiple facts (one per joined tuple)
+    # These facts flow downstream as individual items
+
+    {workflow, produced_facts} =
+      joined_values
+      |> Enum.with_index()
+      |> Enum.reduce({workflow, []}, fn {values, _index}, {wrk, facts} ->
+        joined_fact = Fact.new(value: values, ancestry: {join.hash, fact.hash})
+
+        wrk =
+          wrk
+          |> Workflow.log_fact(joined_fact)
+          |> Workflow.draw_connection(join, joined_fact, :produced, weight: causal_generation)
+
+        {wrk, [joined_fact | facts]}
+      end)
+
+    # Mark all joined edges as satisfied
+    workflow =
+      workflow.graph
+      |> Graph.in_edges(join)
+      |> Enum.filter(&(&1.label in [:runnable, :joined]))
+      |> Enum.reduce(workflow, fn
+        %{v1: v1, label: :runnable}, wrk ->
+          Workflow.mark_runnable_as_ran(wrk, join, v1)
+
+        %{v1: v1, v2: v2, label: :joined}, wrk ->
+          %Workflow{
+            wrk
+            | graph:
+                wrk.graph |> Graph.update_labelled_edge(v1, v2, :joined, label: :join_satisfied)
+          }
+      end)
+
+    # Prepare next runnables for each produced fact
+    workflow =
+      Enum.reduce(produced_facts, workflow, fn joined_fact, wrk ->
+        wrk
+        |> Workflow.prepare_next_runnables(join, joined_fact)
+        |> Workflow.run_after_hooks(join, joined_fact)
+      end)
+
+    # Track in mapped paths if we're in a fan-out context
+    if Join.fan_out_aware?(join) do
+      key = {workflow.generations, join.hash}
+      fact_hashes = Enum.map(produced_facts, & &1.hash)
+      existing = workflow.mapped[key] || []
+
+      %Workflow{
+        workflow
+        | mapped: Map.put(workflow.mapped, key, fact_hashes ++ existing)
+      }
     else
       workflow
     end
@@ -479,12 +674,7 @@ end
 
 defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanOut do
   alias Runic.Workflow
-
-  alias Runic.Workflow.{
-    Fact,
-    FanOut,
-    Components
-  }
+  alias Runic.Workflow.{Fact, FanOut, Components}
 
   def invoke(
         %FanOut{} = fan_out,
@@ -498,21 +688,40 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanOut do
         source_fact.value
       end
 
-    items_fact = Fact.new(value: items, ancestry: {fan_out.hash, source_fact.hash})
+    items_list = if is_list(items), do: items, else: Enum.to_list(items)
+    items_total = length(items_list)
+
+    items_fact = Fact.new(value: items_list, ancestry: {fan_out.hash, source_fact.hash})
 
     unless is_nil(Enumerable.impl_for(items)) do
       causal_generation = Workflow.causal_generation(workflow, source_fact)
       is_reduced? = is_reduced?(workflow, fan_out)
 
-      Enum.reduce(items, workflow, fn value, wrk ->
-        fact = Fact.new(value: value, ancestry: {fan_out.hash, source_fact.hash})
+      {workflow, _} =
+        items_list
+        |> Enum.with_index()
+        |> Enum.reduce({workflow, 0}, fn {value, index}, {wrk, _idx} ->
+          # Create fact with item index tracking
+          fact =
+            Fact.new(
+              value: value,
+              ancestry: {fan_out.hash, source_fact.hash},
+              item_index: index,
+              items_total: items_total,
+              fan_out_hash: fan_out.hash
+            )
 
-        wrk
-        |> Workflow.log_fact(fact)
-        |> Workflow.prepare_next_runnables(fan_out, fact)
-        |> Workflow.draw_connection(fan_out, fact, :fan_out, weight: causal_generation)
-        |> maybe_prepare_map_reduce(is_reduced?, fan_out, fact)
-      end)
+          wrk =
+            wrk
+            |> Workflow.log_fact(fact)
+            |> Workflow.prepare_next_runnables(fan_out, fact)
+            |> Workflow.draw_connection(fan_out, fact, :fan_out, weight: causal_generation)
+            |> maybe_prepare_map_reduce(is_reduced?, fan_out, fact)
+
+          {wrk, index + 1}
+        end)
+
+      workflow
       |> Workflow.mark_runnable_as_ran(fan_out, source_fact)
       |> Workflow.run_after_hooks(fan_out, items_fact)
     else

@@ -4,6 +4,7 @@ defmodule Runic.Workflow.Conjunction do
 
   def new(params) do
     params_map = if Keyword.keyword?(params), do: Map.new(params), else: params
+
     struct!(__MODULE__, params_map)
     |> maybe_set_name()
   end
