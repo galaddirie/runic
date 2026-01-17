@@ -783,7 +783,7 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanIn do
 
     case fan_out do
       nil ->
-        # basic step w/ enummerable output -> fan_in
+        # basic step w/ enumerable output -> fan_in
         reduced_value = Enum.reduce(fact.value, fan_in.init.(), fan_in.reducer)
 
         reduced_fact =
@@ -797,7 +797,10 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanIn do
         |> Workflow.mark_runnable_as_ran(fan_in, fact)
 
       %FanOut{} ->
-        # we may want to check ancestry paths from fan_out to fan_in with set inclusions
+        # Determine expected item count:
+        # 1. If fact has items_total (from a Join or propagated), use that
+        # 2. Otherwise, fall back to counting original FanOut productions
+        expected_count = determine_expected_count(workflow, fact, fan_out)
 
         sister_facts =
           for hash <- workflow.mapped[{workflow.generations, parent_step_hash}] || [] do
@@ -805,30 +808,13 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanIn do
             |> Map.get(hash)
           end
 
-        fan_out_facts_for_generation =
-          workflow.graph
-          |> Graph.out_edges(fan_out)
-          |> Enum.filter(fn edge ->
-            fact_generation =
-              workflow.graph
-              |> Graph.in_edges(edge.v2)
-              |> Enum.filter(&(&1.label == :generation))
-              |> List.first(%{})
-              |> Map.get(:v1)
-
-            edge.label == :fan_out and fact_generation == workflow.generations
-          end)
-          |> Enum.map(& &1.v2)
-          |> Enum.uniq()
-
-        # is a count safe or should we check set inclusions of hashes?
-        if Enum.count(sister_facts) == Enum.count(fan_out_facts_for_generation) and
+        if expected_count && Enum.count(sister_facts) == expected_count &&
              not Enum.empty?(sister_facts) do
           sister_fact_values = Enum.map(sister_facts, & &1.value)
 
           reduced_value = Enum.reduce(sister_fact_values, fan_in.init.(), fan_in.reducer)
 
-          fact =
+          reduced_fact =
             Fact.new(value: reduced_value, ancestry: {fan_in.hash, fact.hash})
 
           workflow =
@@ -838,11 +824,11 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanIn do
             end)
 
           workflow
-          |> Workflow.log_fact(fact)
-          |> Workflow.run_after_hooks(fan_in, fact)
-          |> Workflow.prepare_next_runnables(fan_in, fact)
-          |> Workflow.draw_connection(fan_in, fact, :reduced, weight: causal_generation)
-          |> Workflow.mark_runnable_as_ran(fan_in, fact)
+          |> Workflow.log_fact(reduced_fact)
+          |> Workflow.run_after_hooks(fan_in, reduced_fact)
+          |> Workflow.prepare_next_runnables(fan_in, reduced_fact)
+          |> Workflow.draw_connection(fan_in, reduced_fact, :reduced, weight: causal_generation)
+          |> Workflow.mark_runnable_as_ran(fan_in, reduced_fact)
           |> Map.put(
             :mapped,
             Map.delete(workflow.mapped, {workflow.generations, fan_out.hash})
@@ -852,8 +838,37 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.FanIn do
           |> Workflow.mark_runnable_as_ran(fan_in, fact)
         end
     end
+  end
 
-    # if we have all facts needed then reduce otherwise mark as ran and let last sister fact reduce
+  # Determine how many items we expect before reducing.
+  # Priority:
+  # 1. Use fact.items_total if available (handles post-Join scenarios)
+  # 2. Fall back to counting original FanOut productions
+  defp determine_expected_count(workflow, fact, fan_out) do
+    cond do
+      # If the fact carries items_total, use it
+      # This handles cases where a Join has combined multiple fan-out branches
+      fact.items_total && fact.items_total > 0 ->
+        fact.items_total
+
+      # Fall back to counting FanOut's direct productions in this generation
+      true ->
+        workflow.graph
+        |> Graph.out_edges(fan_out)
+        |> Enum.filter(fn edge ->
+          fact_generation =
+            workflow.graph
+            |> Graph.in_edges(edge.v2)
+            |> Enum.filter(&(&1.label == :generation))
+            |> List.first(%{})
+            |> Map.get(:v1)
+
+          edge.label == :fan_out and fact_generation == workflow.generations
+        end)
+        |> Enum.map(& &1.v2)
+        |> Enum.uniq()
+        |> Enum.count()
+    end
   end
 
   def match_or_execute(_fan_in), do: :execute
