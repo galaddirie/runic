@@ -612,14 +612,21 @@ defimpl Runic.Workflow.Invokable, for: Runic.Workflow.Join do
   end
 
   defp produce_fan_out_join_results(join, workflow, fact, joined_values, causal_generation) do
-    # For fan-out joins, we produce multiple facts (one per joined tuple)
-    # These facts flow downstream as individual items
+    # Calculate items_total for the joined output
+    items_total = length(joined_values)
 
     {workflow, produced_facts} =
       joined_values
       |> Enum.with_index()
-      |> Enum.reduce({workflow, []}, fn {values, _index}, {wrk, facts} ->
-        joined_fact = Fact.new(value: values, ancestry: {join.hash, fact.hash})
+      |> Enum.reduce({workflow, []}, fn {values, index}, {wrk, facts} ->
+        # Set item_index and items_total on joined facts
+        # This ensures downstream steps have correct fan-out context
+        joined_fact = Fact.new(
+          value: values,
+          ancestry: {join.hash, fact.hash},
+          item_index: index,
+          items_total: items_total
+        )
 
         wrk =
           wrk
