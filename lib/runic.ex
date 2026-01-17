@@ -723,6 +723,7 @@ defmodule Runic do
         name: unquote(name),
         hash: hash,
         fan_in: %FanIn{
+          name: unquote(name),
           map: unquote(map_to_reduce),
           init: fn -> unquote(acc) end,
           reducer: unquote(rewritten_reducer_fun),
